@@ -1,0 +1,60 @@
+# file: .github/workflows/release.yml
+# version: 1.0.0
+# guid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+# last-edited: 2026-05-01
+
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      release-type:
+        description: 'Release type (auto, major, minor, patch)'
+        required: false
+        type: choice
+        options:
+          - auto
+          - major
+          - minor
+          - patch
+        default: 'auto'
+      prerelease:
+        description: 'Create prerelease'
+        required: false
+        type: boolean
+        default: false
+      draft:
+        description: 'Create draft release'
+        required: false
+        type: boolean
+        default: false
+      stable:
+        description: 'Publish a stable (non-RC) release directly'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+  attestations: write
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    name: Automated Release
+    uses: jdfalk/ghcommon/.github/workflows/reusable-release.yml@fe1e3081e230dd5ac3d358f9c6a3e4dc0b209529
+    with:
+      release-type: ${{ inputs.release-type || 'auto' }}
+      build-target: 'all'
+      draft: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.draft == 'true' || false }}
+      prerelease: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.prerelease == 'true' }}
+      stable: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.stable == 'true' || false }}
+    secrets: inherit
