@@ -1,37 +1,159 @@
+# file: action.yml
+# version: 2.0.0
+
 name: 'Docker Release Build'
-description: 'Build and push Docker images for release'
-author: 'jdfalk'
+description: 'Build and push multi-platform Docker images to a registry'
+author: 'falkcorp'
+
+branding:
+  icon: 'package'
+  color: 'blue'
 
 inputs:
+  # --- simplified facade inputs (from wrapper) ---
   platform:
-    description: 'Target platform (e.g. linux/amd64)'
+    description: 'Target platform (e.g. linux/amd64). Overrides platforms if set.'
     required: false
-    default: 'linux/amd64'
+    default: ''
   registry:
     description: 'Container registry hostname'
     required: true
   image-name:
-    description: 'Container image name'
+    description: 'Container image name (without registry prefix)'
     required: true
   username:
     description: 'Registry username'
     required: true
   password:
-    description: 'Registry password/token'
+    description: 'Registry password or token'
     required: true
+
+  # --- full implementation inputs (from base) ---
+  context:
+    description: 'Docker build context directory'
+    required: false
+    default: '.'
+  dockerfile:
+    description: 'Path to Dockerfile'
+    required: false
+    default: 'Dockerfile'
+  platforms:
+    description: 'Comma-separated list of platforms (used when platform is empty)'
+    required: false
+    default: 'linux/amd64,linux/arm64'
+  tag:
+    description: 'Primary image tag (defaults to git SHA)'
+    required: false
+    default: ''
+  additional-tags:
+    description: 'Additional tags to apply (comma-separated)'
+    required: false
+    default: ''
+  push:
+    description: 'Whether to push the image'
+    required: false
+    default: 'true'
+  build-args:
+    description: 'Build arguments (key=value, one per line)'
+    required: false
+    default: ''
+  cache-from:
+    description: 'Cache source (type=registry,ref=...)'
+    required: false
+    default: ''
+  cache-to:
+    description: 'Cache destination (type=registry,ref=...)'
+    required: false
+    default: ''
+
+outputs:
+  digest:
+    description: 'Image digest'
+    value: ${{ steps.build.outputs.digest }}
+  metadata:
+    description: 'Build result metadata'
+    value: ${{ steps.build.outputs.metadata }}
+  tags:
+    description: 'Generated tags'
+    value: ${{ steps.meta.outputs.tags }}
 
 runs:
   using: 'composite'
   steps:
-    - name: Build and push image
-      uses: falkcorp/gha-release-docker@5387e474a28e5e4b10a11f1a98f84f9684a148ad # v1.1.0+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+    - name: Log in to registry
+      if: inputs.username != '' && inputs.password != ''
+      uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
       with:
-        context: .
-        dockerfile: Dockerfile
-        platforms: ${{ inputs.platform }}
         registry: ${{ inputs.registry }}
-        image-name: ${{ inputs.image-name }}
-        tag: ${{ github.sha }}
-        additional-tags: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         username: ${{ inputs.username }}
         password: ${{ inputs.password }}
+
+    - name: Resolve effective platforms
+      id: platforms
+      shell: bash
+      run: |
+        # Single-platform shorthand takes precedence over multi-platform list
+        if [ -n "${{ inputs.platform }}" ]; then
+          echo "value=${{ inputs.platform }}" >> "$GITHUB_OUTPUT"
+        else
+          echo "value=${{ inputs.platforms }}" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Resolve image tag
+      id: resolved-tag
+      shell: bash
+      run: |
+        TAG="${{ inputs.tag }}"
+        if [ -z "$TAG" ]; then
+          TAG="${{ github.sha }}"
+        fi
+        echo "value=$TAG" >> "$GITHUB_OUTPUT"
+
+    - name: Resolve additional tags
+      id: resolved-extra
+      shell: bash
+      run: |
+        EXTRA="${{ inputs.additional-tags }}"
+        if [ -z "$EXTRA" ] && [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          EXTRA="${{ github.ref_name }}"
+        fi
+        echo "value=$EXTRA" >> "$GITHUB_OUTPUT"
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+      with:
+        images: ${{ inputs.registry }}/${{ inputs.image-name }}
+        tags: |
+          type=raw,value=${{ steps.resolved-tag.outputs.value }}
+          ${{ steps.resolved-extra.outputs.value }}
+
+    - name: Build and push
+      id: build
+      uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.dockerfile }}
+        platforms: ${{ steps.platforms.outputs.value }}
+        push: ${{ inputs.push }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        build-args: ${{ inputs.build-args }}
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}
+
+    - name: Output summary
+      shell: bash
+      run: |
+        echo "## Docker Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Image:** ${{ inputs.registry }}/${{ inputs.image-name }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Tags:** ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Platforms:** ${{ steps.platforms.outputs.value }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Digest:** ${{ steps.build.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
